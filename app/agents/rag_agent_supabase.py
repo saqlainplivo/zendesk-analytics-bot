@@ -84,11 +84,15 @@ class RAGAgent:
         # Build context from tickets
         context_parts = []
         for i, ticket in enumerate(tickets, 1):
+            description = ticket.get('description') or 'N/A'
+            if description != 'N/A':
+                description = description[:300] + "..."
+
             context_parts.append(
                 f"Ticket #{i} (ID: {ticket.get('ticket_id', 'N/A')}):\n"
                 f"Organization: {ticket.get('organization_name', 'N/A')}\n"
                 f"Subject: {ticket.get('subject', 'N/A')}\n"
-                f"Description: {ticket.get('description', 'N/A')[:300]}...\n"
+                f"Description: {description}\n"
                 f"Created: {ticket.get('created_at', 'N/A')}\n"
                 f"Similarity: {ticket.get('similarity', 0):.2f}\n"
             )

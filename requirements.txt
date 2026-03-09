@@ -11,9 +11,12 @@ pgvector==0.2.4
 
 # AI/ML
 openai==1.10.0
+groq==0.4.1
 tiktoken==0.5.2
 langchain==0.1.4
 langchain-openai==0.0.5
+markdown2==2.4.12
+supabase==2.3.4
 
 # Data processing
 pandas==2.1.4

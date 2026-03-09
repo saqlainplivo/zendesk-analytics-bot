@@ -8,8 +8,9 @@ from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
+import json
 
 # Use Supabase-based services (works over HTTPS, bypasses firewall)
 from app.database.supabase_db import get_db, check_db_connection, SupabaseDB
@@ -98,7 +99,55 @@ async def health_check() -> Dict[str, str]:
     }
 
 
-# Chat endpoint
+# Streaming chat endpoint
+@app.post("/chat/stream", tags=["Chat"])
+async def chat_stream(
+    request: ChatRequest,
+    db: SupabaseDB = Depends(get_db)
+):
+    """
+    Streaming chat endpoint with Groq-enhanced responses.
+
+    Returns Server-Sent Events (SSE) stream.
+    """
+    async def generate():
+        try:
+            # Get answer from analytics service
+            result = analytics_service.answer_question(db, request.question)
+
+            # Stream the response with Groq enhancement
+            from app.agents.groq_reasoning_engine import GroqReasoningEngine
+            groq = GroqReasoningEngine()
+
+            # Send reasoning first
+            yield f"data: {json.dumps({'type': 'reasoning', 'content': result.get('reasoning', '')})}\n\n"
+
+            # Send agent type
+            yield f"data: {json.dumps({'type': 'agent', 'content': result.get('query_type', 'analytics')})}\n\n"
+
+            # Stream enhanced answer
+            for chunk in groq.stream_enhanced_response(
+                request.question,
+                result.get('answer', ''),
+                result.get('evidence', [])
+            ):
+                yield f"data: {json.dumps({'type': 'answer', 'content': chunk})}\n\n"
+
+            # Send evidence
+            if result.get('evidence'):
+                yield f"data: {json.dumps({'type': 'evidence', 'content': result.get('evidence', []), 'details': result.get('evidence_details', [])})}\n\n"
+
+            # End stream
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# Chat endpoint (non-streaming fallback)
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
 async def chat(
     request: ChatRequest,
