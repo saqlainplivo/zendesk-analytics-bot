@@ -34,68 +34,94 @@ class ReasoningEngine:
 
         system_prompt = """You are a query analyzer for a Zendesk ticket analytics system.
 
-Your job is to analyze user questions and extract:
-1. **Intent**: What the user wants (count, list, top_n, search, summary)
-2. **Organization**: Company/organization name mentioned (case-sensitive extraction)
-3. **Time Filter**: Any time period mentioned
-4. **Query Type**: "analytics" (for counts, aggregations) or "lookup" (for semantic search)
+The tickets database has these columns you can filter on:
+- organization_name : customer/company name (e.g. "Kixie", "Plivo Inc", "Google")
+- priority          : "Normal", "High", "Low", "Urgent"
+- status            : "open", "closed", "pending", "solved", "new"
+- ticket_type       : "Incident", "Problem", "Question", "Task"
+- support_tier      : "Tier 1", "Tier 2", "Tier 3", "Tier 4", "Tier 5"
+- product           : "Messaging API", "Voice API", "SIP Trunking", "PlivoCX"
+- country           : country name e.g. "US", "INDIA", "PHILIPPINES"
+- assignee          : agent/assignee name
+- group_name        : support team name
 
-Return a JSON object with:
+Your job is to extract:
+1. **intent**     : count | list | top_n | search | summary
+2. **query_type** : "analytics" (counts, rankings, lists) or "lookup" (semantic search, summaries, "what issues")
+3. **time_filter**: natural language time period or null
+4. **db_filters** : dict of column→value for EVERY filter condition in the question.
+                    Use exact column names from the list above.
+                    Only include filters explicitly mentioned.
+
+Return ONLY a JSON object:
 {
-    "reasoning": "Step-by-step analysis of what the user wants",
-    "intent": "count|list|top_n|search|summary",
-    "organization": "exact organization name or null",
-    "time_filter": "time period or null",
-    "query_type": "analytics|lookup",
-    "filters": {
-        "organization": "organization name",
-        "time_period": "time period"
+    "reasoning"  : "step-by-step explanation",
+    "intent"     : "count|list|top_n|search|summary",
+    "query_type" : "analytics|lookup",
+    "time_filter": "last month|last week|this year|... or null",
+    "db_filters" : {
+        "organization_name": "...",
+        "priority": "...",
+        "support_tier": "...",
+        ... only what is mentioned
     }
 }
 
 Examples:
 
-Q: "Bolna ticket count"
+Q: "How many Tier 1 Kixie tickets in the past year?"
 A: {
-    "reasoning": "User wants to count tickets for organization 'Bolna'",
+    "reasoning": "Count tickets filtered by org=Kixie, tier=Tier 1, time=past year",
     "intent": "count",
-    "organization": "Bolna",
-    "time_filter": null,
     "query_type": "analytics",
-    "filters": {"organization": "Bolna"}
+    "time_filter": "last year",
+    "db_filters": {"organization_name": "Kixie", "support_tier": "Tier 1"}
 }
 
-Q: "how many tickets were raised by bolna"
+Q: "how many high priority open incidents from Bolna last month?"
 A: {
-    "reasoning": "User wants to count tickets raised by organization 'bolna'",
+    "reasoning": "Count open high-priority incidents from Bolna last month",
     "intent": "count",
-    "organization": "bolna",
-    "time_filter": null,
     "query_type": "analytics",
-    "filters": {"organization": "bolna"}
+    "time_filter": "last month",
+    "db_filters": {"organization_name": "Bolna", "priority": "High", "status": "open", "ticket_type": "Incident"}
 }
 
-Q: "top 5 customers"
+Q: "top 5 customers by ticket count"
 A: {
-    "reasoning": "User wants top 5 organizations ranked by ticket count",
+    "reasoning": "Rank top 5 orgs by ticket volume",
     "intent": "top_n",
-    "organization": null,
-    "time_filter": null,
     "query_type": "analytics",
-    "filters": {"limit": 5}
+    "time_filter": null,
+    "db_filters": {}
+}
+
+Q: "how many tickets were raised by Kixie?"
+A: {
+    "reasoning": "Count all tickets from Kixie",
+    "intent": "count",
+    "query_type": "analytics",
+    "time_filter": null,
+    "db_filters": {"organization_name": "Kixie"}
 }
 
 Q: "what issues did Kixie face last month?"
 A: {
-    "reasoning": "User wants to search for issues faced by Kixie in the last month - semantic search needed",
+    "reasoning": "Semantic search for Kixie issues - needs RAG not SQL",
     "intent": "search",
-    "organization": "Kixie",
-    "time_filter": "last month",
     "query_type": "lookup",
-    "filters": {"organization": "Kixie", "time_period": "last month"}
+    "time_filter": "last month",
+    "db_filters": {"organization_name": "Kixie"}
 }
 
-Be precise and extract exact organization names as mentioned by the user."""
+Q: "show me all Messaging API tickets"
+A: {
+    "reasoning": "List tickets filtered by product=Messaging API",
+    "intent": "list",
+    "query_type": "analytics",
+    "time_filter": null,
+    "db_filters": {"product": "Messaging API"}
+}"""
 
         try:
             response = self.client.chat.completions.create(
@@ -147,11 +173,12 @@ Be precise and extract exact organization names as mentioned by the user."""
         Returns:
             Execution plan dictionary
         """
+        db_filters = analysis.get("db_filters", {})
         plan = {
             "reasoning": analysis.get("reasoning", ""),
             "query_type": analysis.get("query_type", "analytics"),
             "filters": {
-                "organization": analysis.get("organization"),
+                "db_filters": db_filters,
                 "time_filter": analysis.get("time_filter")
             },
             "intent": analysis.get("intent", "count"),

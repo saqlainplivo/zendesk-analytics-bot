@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     # Vector Search
     top_k_results: int = 5
-    similarity_threshold: float = 0.7
+    similarity_threshold: float = 0.5
 
     # Data Source
     zendesk_csv_path: str = "../Zendesk_tix.csv"
