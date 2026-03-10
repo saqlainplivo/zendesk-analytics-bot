@@ -1,7 +1,8 @@
 """Router agent with reasoning engine for better query understanding."""
 
 import logging
-from typing import Dict, Any
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional
 
 from app.agents.sql_agent_supabase import SQLAgent
 from app.agents.rag_agent_supabase import RAGAgent
@@ -18,99 +19,67 @@ class RouterAgent:
     """Router agent with reasoning engine for intelligent query routing."""
 
     def __init__(self):
-        """Initialize router with configurable reasoning engine and specialized agents."""
-        # Select reasoning engine based on config
-        engine_type = settings.reasoning_engine.lower()
-        if engine_type == "nvidia":
-            self.reasoning_engine = NvidiaReasoningEngine()
-            logger.info("🎯 Using NVIDIA NIM reasoning engine")
-        elif engine_type == "groq":
-            self.reasoning_engine = GroqReasoningEngine()
-            logger.info("🚀 Using Groq reasoning engine")
-        else:
-            self.reasoning_engine = GroqReasoningEngine()  # Default
-            logger.info("🚀 Using Groq reasoning engine (default)")
-
+        self.reasoning_engine = ReasoningEngine()
         self.sql_agent = SQLAgent()
         self.rag_agent = RAGAgent()
 
-    def route_and_answer(
-        self,
-        db: SupabaseDB,
-        question: str
-    ) -> Dict[str, Any]:
-        """
-        Route question using reasoning engine, then get answer.
+    def route_and_answer(self, db: SupabaseDB, question: str) -> Dict[str, Any]:
+        """Route question using reasoning engine, then get answer."""
+        logger.info(f"🧠 Routing: {question}")
 
-        Args:
-            db: Supabase database instance
-            question: Natural language question
-
-        Returns:
-            Answer dictionary with reasoning, response, and evidence
-        """
-        logger.info(f"🧠 Routing question with reasoning: {question}")
-
-        # Step 1: Analyze question with reasoning engine
         analysis = self.reasoning_engine.analyze_question(question)
-
-        # Step 2: Create execution plan
         plan = self.reasoning_engine.create_execution_plan(question, analysis)
 
-        # Extract parameters from analysis
-        organization = analysis.get("organization")
+        db_filters = analysis.get("db_filters", {})
+        # organization_name may be in db_filters (new) or organization (old fallback)
+        organization = db_filters.get("organization_name") or analysis.get("organization")
         query_type = analysis.get("query_type", "analytics")
+        time_filter = self._parse_time_filter(analysis.get("time_filter"))
 
         logger.info(f"📋 Plan: {plan['reasoning']}")
-        logger.info(f"🎯 Organization: {organization}")
-        logger.info(f"🔀 Query type: {query_type}")
-
-        # Step 3: Execute query with appropriate agent
-        # Override the question with enhanced version if we have filters
-        enhanced_question = question
-        if organization and organization.lower() not in question.lower():
-            enhanced_question = f"{question} (filtering by organization: {organization})"
+        logger.info(f"🎯 Filters: {db_filters} | Type: {query_type} | Time: {analysis.get('time_filter')}")
 
         if query_type == "analytics":
-            # Use SQL agent with extracted parameters
             logger.info("📊 Using SQL Analytics Agent")
-            result = self._execute_sql_query(db, question, organization, analysis)
+            result = self._execute_sql_query(db, question, organization, analysis, time_filter, db_filters)
         else:
-            # Use RAG agent
             logger.info("🔍 Using Semantic Search Agent")
-            result = self.rag_agent.answer_question(db, enhanced_question)
+            result = self.rag_agent.answer_question(db, question, organization=organization)
 
-        # Step 4: Add reasoning to result
         result["reasoning"] = plan["reasoning"]
         result["query_type"] = "analytics" if query_type == "analytics" else "lookup"
-
         return result
 
     def _execute_sql_query(
         self,
         db: SupabaseDB,
         question: str,
-        organization: str,
-        analysis: Dict[str, Any]
+        organization: Optional[str],
+        analysis: Dict[str, Any],
+        time_filter: Optional[Dict[str, datetime]],
+        db_filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Execute SQL query with enhanced organization filtering."""
+        """Execute SQL query, passing db_filters + time_filter from reasoning engine."""
         intent = analysis.get("intent", "count")
+        db_filters = db_filters or {}
 
-        # Direct database query based on intent
         if intent == "count":
-            return self._handle_count_with_org(db, question, organization)
-        elif intent == "list":
-            return self._handle_list_with_org(db, question, organization, analysis)
-        elif intent == "top_n":
-            return self.sql_agent.answer_question(db, question)
+            return self._handle_count_with_filters(db, question, db_filters, time_filter)
         else:
-            return self.sql_agent.answer_question(db, question)
+            # top_n, list, etc.
+            return self.sql_agent.answer_question(
+                db, question,
+                organization=organization,
+                time_filter=time_filter,
+                db_filters=db_filters,
+            )
 
-    def _handle_count_with_org(
+    def _handle_count_with_filters(
         self,
         db: SupabaseDB,
         question: str,
-        organization: str
+        db_filters: Dict[str, Any],
+        time_filter: Optional[Dict[str, datetime]],
     ) -> Dict[str, Any]:
         """Handle count queries with fuzzy organization filtering."""
         # Parse time filter if present
@@ -138,290 +107,90 @@ class RouterAgent:
                 columns="ticket_id,subject,organization_name,priority,status,created_at,description",
                 filters=filters if filters else None,
                 order_by="-created_at",
-                limit=5
+                limit=5,
+                date_range=time_filter,
             )
         else:
-            # Fuzzy matching with Python (Supabase ilike has issues with wildcards)
-            org_lower = organization.lower().strip()
-            logger.info(f"🔍 Fuzzy matching organization: '{org_lower}'")
+            count = db.execute_count_query("tickets", db_filters, date_range=time_filter)
 
-            # Fetch all tickets (Supabase has 1000 record limit, so we'll paginate)
-            all_tickets = []
-            offset = 0
-            batch_size = 1000
+            # If zero with exact org match, try case-insensitive fuzzy org match
+            if count == 0 and organization:
+                non_org_filters = {k: v for k, v in db_filters.items() if k != "organization_name"}
+                all_tickets = db.execute_select_query(
+                    "tickets",
+                    columns="ticket_id,subject,organization_name,priority,status,created_at",
+                    filters=non_org_filters if non_org_filters else None,
+                    order_by="-created_at",
+                    limit=5000,
+                    date_range=time_filter,
+                )
+                org_lower = organization.lower()
+                matching = [
+                    t for t in all_tickets
+                    if org_lower in (t.get("organization_name") or "").lower()
+                ]
+                count = len(matching)
+                tickets = matching[:5]
+            else:
+                tickets = db.execute_select_query(
+                    "tickets",
+                    columns="ticket_id,subject,organization_name,priority,status,created_at",
+                    filters=db_filters,
+                    order_by="-created_at",
+                    limit=5,
+                    date_range=time_filter,
+                )
 
-            while True:
-                batch = db.client.table("tickets").select(
-                    "ticket_id,subject,organization_name,priority,status,created_at,description"
-                ).order("created_at", desc=True).range(offset, offset + batch_size - 1).execute()
-
-                if not batch.data:
-                    break
-
-                all_tickets.extend(batch.data)
-                offset += batch_size
-
-                # Stop if we got less than batch_size (last page)
-                if len(batch.data) < batch_size:
-                    break
-
-            logger.info(f"📥 Fetched {len(all_tickets)} tickets for fuzzy matching")
-
-            # Python-side fuzzy matching with time filter
-            matching_tickets = []
-            for t in all_tickets:
-                org_name = t.get('organization_name', '').lower().strip()
-
-                # Match organization
-                if org_lower not in org_name:
-                    continue
-
-                # Apply time filter if specified
-                if time_range:
-                    created_at_str = t.get('created_at')
-                    if created_at_str:
-                        try:
-                            from dateutil import parser as date_parser
-                            created_at = date_parser.parse(created_at_str)
-                            if not (time_range[0] <= created_at <= time_range[1]):
-                                continue
-                        except:
-                            pass
-
-                matching_tickets.append(t)
-
-        count = len(matching_tickets)
-        tickets = matching_tickets[:5]
-
-        # Only apply additional filters if explicitly mentioned in question
-        question_lower = question.lower()
-        has_priority_filter = any(kw in question_lower for kw in ["high", "urgent", "critical", "low", "normal", "priority"])
-        has_status_filter = any(kw in question_lower for kw in ["open", "closed", "pending", "solved", "resolved"])
-
-        if matching_tickets and (has_priority_filter or has_status_filter):
-            filtered = self._apply_additional_filters(matching_tickets, question)
-            if filtered:  # Only apply if we still have results
-                count = len(filtered)
-                tickets = filtered[:5]
-                logger.info(f"🎯 Applied filters: priority={has_priority_filter}, status={has_status_filter}")
-
-        if count > 0:
-                unique_orgs = set(t.get('organization_name') for t in matching_tickets[:10])
-                if time_range:
-                    time_desc = TimeParser.format_time_range(time_range[0], time_range[1])
-                    logger.info(f"✓ Found {count} tickets matching '{organization}' {time_desc}")
-                else:
-                    logger.info(f"✓ Found {count} tickets matching '{organization}' in orgs: {list(unique_orgs)}")
-
-        evidence = [t["ticket_id"] for t in tickets]
-
-        # Generate answer
-        answer = f"Found {count} ticket{'s' if count != 1 else ''}"
+        # Build human-readable answer
+        answer = f"Found **{count}** ticket{'s' if count != 1 else ''}"
+        filter_parts = []
         if organization:
-            answer += f" for **{organization}**"
+            filter_parts.append(f"**{organization}**")
+        for key, value in db_filters.items():
+            if key == "organization_name":
+                continue
+            label = key.replace("_", " ").title()
+            filter_parts.append(f"{label}: **{value}**")
+        if filter_parts:
+            answer += " matching " + ", ".join(filter_parts)
+        if time_filter:
+            answer += " in the specified time period"
         answer += "."
 
         if count > 0 and tickets:
-            answer += f"\n\n**Most recent:**\n"
+            answer += "\n\n**Most recent:**\n"
             for i, t in enumerate(tickets[:3], 1):
                 answer += f"{i}. {t.get('subject', 'N/A')} (#{t['ticket_id']})\n"
 
         return {
             "answer": answer,
-            "evidence": evidence,
+            "evidence": [t["ticket_id"] for t in tickets],
             "evidence_details": tickets,
             "metadata": {
                 "count": count,
-                "organization": organization,
-                "query_type": "count"
-            }
+                "filters": db_filters,
+                "query_type": "count",
+                "time_filter": str(time_filter) if time_filter else None,
+            },
         }
 
-    def _handle_list_with_org(
-        self,
-        db: SupabaseDB,
-        question: str,
-        organization: str,
-        analysis: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Handle list queries with organization filtering."""
-        # Extract filters from question
-        question_lower = question.lower()
-        status_filter = None
-        priority_filter = None
+    def _parse_time_filter(self, time_str: Optional[str]) -> Optional[Dict[str, datetime]]:
+        """Convert reasoning engine's time string to a date range dict."""
+        if not time_str:
+            return None
+        t = time_str.lower()
+        now = datetime.now()
 
-        # Detect status filter
-        if "open" in question_lower or "active" in question_lower:
-            status_filter = "open"
-        elif "closed" in question_lower:
-            status_filter = "closed"
-        elif "pending" in question_lower or "waiting" in question_lower:
-            status_filter = "pending"
-        elif "solved" in question_lower or "resolved" in question_lower:
-            status_filter = "solved"
-
-        # Detect priority filter
-        if "high" in question_lower or "urgent" in question_lower:
-            priority_filter = "high"
-        elif "low" in question_lower:
-            priority_filter = "low"
-        elif "normal" in question_lower:
-            priority_filter = "normal"
-
-        if not organization:
-            # No organization filter - fetch tickets with SQL filters if possible
-            filters = {}
-            if status_filter:
-                filters["status"] = status_filter
-                logger.info(f"🎯 Applying direct status filter: {status_filter}")
-
-            tickets = db.execute_select_query(
-                "tickets",
-                columns="ticket_id,subject,organization_name,priority,status,created_at,description",
-                filters=filters if filters else None,
-                order_by="-created_at",
-                limit=10
-            )
-            count = db.execute_count_query("tickets", filters if filters else None)
-        else:
-            # Fuzzy matching for organization
-            org_lower = organization.lower().strip()
-            logger.info(f"🔍 Listing tickets for: '{org_lower}'")
-
-            # Fetch all tickets and fuzzy match
-            all_tickets = []
-            offset = 0
-            batch_size = 1000
-
-            while True:
-                batch = db.client.table("tickets").select(
-                    "ticket_id,subject,organization_name,priority,status,created_at,description"
-                ).order("created_at", desc=True).range(offset, offset + batch_size - 1).execute()
-
-                if not batch.data:
-                    break
-
-                all_tickets.extend(batch.data)
-                offset += batch_size
-
-                if len(batch.data) < batch_size:
-                    break
-
-            # Python-side fuzzy matching
-            matching_tickets = [
-                t for t in all_tickets
-                if org_lower in t.get('organization_name', '').lower().strip()
-            ]
-
-            count = len(matching_tickets)
-            tickets = matching_tickets[:10]
-
-            if count > 0:
-                unique_orgs = set(t.get('organization_name') for t in matching_tickets[:10])
-                logger.info(f"✓ Found {count} tickets from: {list(unique_orgs)}")
-
-        # Only apply additional filters if explicitly mentioned
-        question_lower = question.lower()
-        has_priority_filter = any(kw in question_lower for kw in ["high", "urgent", "critical", "low", "normal", "priority"])
-        has_status_filter = any(kw in question_lower for kw in ["open", "closed", "pending", "solved", "resolved"])
-
-        if tickets and (has_priority_filter or has_status_filter):
-            filtered = self._apply_additional_filters(tickets, question)
-            if filtered:  # Only apply if we still have results
-                count = len(filtered)
-                tickets = filtered[:10]
-
-        evidence = [t["ticket_id"] for t in tickets]
-
-        # Generate answer with ticket list
-        if count == 0:
-            answer = f"No tickets found"
-            if organization:
-                answer += f" for **{organization}**"
-            answer += "."
-        else:
-            answer = f"Found **{count}** ticket{'s' if count != 1 else ''}"
-            if organization:
-                answer += f" from **{organization}**"
-            answer += ":\n\n"
-
-            for i, t in enumerate(tickets[:10], 1):
-                priority = t.get('priority', 'N/A')
-                status = t.get('status', 'N/A')
-                subject = t.get('subject', 'N/A')
-                ticket_id = t['ticket_id']
-
-                answer += f"{i}. [{priority.upper()}] {subject}\n"
-                answer += f"   Status: {status} | ID: #{ticket_id}\n\n"
-
-            if count > 10:
-                answer += f"\n*Showing 10 of {count} total tickets*"
-
-        return {
-            "answer": answer,
-            "evidence": evidence,
-            "evidence_details": tickets,
-            "metadata": {
-                "count": count,
-                "organization": organization,
-                "query_type": "list"
-            }
-        }
-
-    def _apply_additional_filters(
-        self,
-        tickets: list,
-        question: str
-    ) -> list:
-        """Apply priority and status filters from question (lenient matching)."""
-        question_lower = question.lower()
-        filtered = tickets
-
-        # Priority filter (more lenient, includes N/A as potential match)
-        priority_keywords = {
-            "high": ["high priority", "high"],
-            "urgent": ["urgent", "critical"],
-            "low": ["low priority", "low"],
-            "normal": ["normal", "medium"]
-        }
-
-        for priority, keywords in priority_keywords.items():
-            if any(kw in question_lower for kw in keywords):
-                # Include tickets with matching priority OR missing priority (to be lenient)
-                filtered = [
-                    t for t in filtered
-                    if t.get('priority', '').lower() in [priority, 'urgent', 'critical', 'high', ''] or
-                       (priority == 'high' and t.get('priority', '').lower() in ['urgent', 'critical']) or
-                       t.get('priority', '') in ['N/A', None, '']  # Include missing priorities
-                ]
-                logger.info(f"🎯 Applied lenient priority filter: {priority} (kept {len(filtered)} tickets)")
-                break
-
-        # Status filter (more lenient)
-        status_keywords = {
-            "open": ["open", "active"],
-            "closed": ["closed"],
-            "pending": ["pending", "waiting"],
-            "solved": ["solved", "resolved"]
-        }
-
-        for status, keywords in status_keywords.items():
-            if any(kw in question_lower for kw in keywords):
-                # More lenient matching
-                status_variations = {
-                    "open": ["open", "new", "active"],
-                    "closed": ["closed", "solved"],
-                    "pending": ["pending", "hold", "waiting"],
-                    "solved": ["solved", "resolved", "closed"]
-                }
-
-                allowed_statuses = status_variations.get(status, [status])
-                filtered = [
-                    t for t in filtered
-                    if t.get('status', '').lower() in allowed_statuses or
-                       t.get('status', '') in ['N/A', None, '']  # Include missing status
-                ]
-                logger.info(f"🎯 Applied lenient status filter: {status} (kept {len(filtered)} tickets)")
-                break
-
-        return filtered
+        if "last week" in t or "past week" in t:
+            return {"start_date": now - timedelta(days=7), "end_date": now}
+        elif "last month" in t or "past month" in t:
+            return {"start_date": now - timedelta(days=30), "end_date": now}
+        elif "this week" in t:
+            return {"start_date": now - timedelta(days=now.weekday()), "end_date": now}
+        elif "this month" in t:
+            return {"start_date": now.replace(day=1), "end_date": now}
+        elif "today" in t:
+            return {"start_date": now.replace(hour=0, minute=0, second=0), "end_date": now}
+        elif "last year" in t or "past year" in t:
+            return {"start_date": now - timedelta(days=365), "end_date": now}
+        return None

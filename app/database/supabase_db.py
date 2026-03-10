@@ -33,7 +33,12 @@ class SupabaseDB:
     def __init__(self):
         self.client = get_supabase()
 
-    def execute_count_query(self, table: str, filters: Optional[Dict[str, Any]] = None) -> int:
+    def execute_count_query(
+        self,
+        table: str,
+        filters: Optional[Dict[str, Any]] = None,
+        date_range: Optional[Dict[str, Any]] = None
+    ) -> int:
         """Execute a count query on a table."""
         try:
             query = self.client.table(table).select("*", count="exact")
@@ -45,10 +50,22 @@ class SupabaseDB:
                     else:
                         query = query.eq(key, value)
 
+            if date_range:
+                if date_range.get("start_date"):
+                    query = query.gte("created_at", date_range["start_date"].isoformat())
+                if date_range.get("end_date"):
+                    query = query.lte("created_at", date_range["end_date"].isoformat())
+
             result = query.execute()
             return result.count if result.count is not None else 0
         except Exception as e:
             logger.error(f"Count query error: {e}")
+            # If a column doesn't exist yet (schema migration pending), retry without those filters
+            if filters and ("column" in str(e).lower() or "PGRST" in str(e) or "does not exist" in str(e)):
+                logger.warning("Column filter error — schema migration may be pending. Retrying without extra filters.")
+                org_only = {k: v for k, v in filters.items() if k in ("organization_name", "status", "priority")}
+                if org_only != filters:
+                    return self.execute_count_query(table, org_only if org_only else None, date_range)
             return 0
 
     def execute_select_query(
@@ -57,7 +74,8 @@ class SupabaseDB:
         columns: str = "*",
         filters: Optional[Dict[str, Any]] = None,
         order_by: Optional[str] = None,
-        limit: Optional[int] = None
+        limit: Optional[int] = None,
+        date_range: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """Execute a select query on a table."""
         try:
@@ -69,6 +87,12 @@ class SupabaseDB:
                         query = query.in_(key, value)
                     else:
                         query = query.eq(key, value)
+
+            if date_range:
+                if date_range.get("start_date"):
+                    query = query.gte("created_at", date_range["start_date"].isoformat())
+                if date_range.get("end_date"):
+                    query = query.lte("created_at", date_range["end_date"].isoformat())
 
             if order_by:
                 desc = order_by.startswith("-")
@@ -82,6 +106,14 @@ class SupabaseDB:
             return result.data if result.data else []
         except Exception as e:
             logger.error(f"Select query error: {e}")
+            # If a column filter doesn't exist yet (schema migration pending), retry without extra filters
+            if filters and ("column" in str(e).lower() or "PGRST" in str(e) or "does not exist" in str(e)):
+                logger.warning("Column filter error — schema migration may be pending. Retrying without extra filters.")
+                safe_keys = ("organization_name", "status", "priority")
+                safe_filters = {k: v for k, v in filters.items() if k in safe_keys}
+                if safe_filters != filters:
+                    return self.execute_select_query(table, columns, safe_filters if safe_filters else None,
+                                                     order_by, limit, date_range)
             return []
 
     def get_tickets_by_organization(
@@ -113,22 +145,30 @@ class SupabaseDB:
             return []
 
     def get_top_organizations(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get top organizations by ticket count."""
+        """Get top organizations by ticket count (paginated across all tickets)."""
         try:
-            # Note: Supabase doesn't support GROUP BY directly via REST API
-            # We'll fetch all tickets and group in Python
-            result = self.client.table("tickets").select("organization_name").execute()
+            all_rows = []
+            page, PAGE_SIZE = 0, 1000
+            while True:
+                result = (self.client.table("tickets")
+                          .select("organization_name")
+                          .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
+                          .execute())
+                if not result.data:
+                    break
+                all_rows.extend(result.data)
+                if len(result.data) < PAGE_SIZE:
+                    break
+                page += 1
 
-            if not result.data:
+            if not all_rows:
                 return []
 
-            # Count tickets per organization
-            org_counts = {}
-            for ticket in result.data:
-                org = ticket.get("organization_name", "Unknown")
+            org_counts: Dict[str, int] = {}
+            for ticket in all_rows:
+                org = ticket.get("organization_name") or "Unknown"
                 org_counts[org] = org_counts.get(org, 0) + 1
 
-            # Sort and limit
             top_orgs = sorted(
                 [{"organization": org, "ticket_count": count} for org, count in org_counts.items()],
                 key=lambda x: x["ticket_count"],
@@ -148,7 +188,6 @@ class SupabaseDB:
     ) -> List[Dict[str, Any]]:
         """Search for similar tickets using vector similarity or text search fallback."""
         try:
-            # Try Supabase RPC function for vector similarity search
             result = self.client.rpc(
                 "match_tickets",
                 {
@@ -158,27 +197,31 @@ class SupabaseDB:
                 }
             ).execute()
 
-            if result.data:
-                logger.info(f"✓ Vector search returned {len(result.data)} results")
-                return result.data
+            if not result.data:
+                logger.info("No tickets above similarity threshold")
+                return []
 
-            logger.warning("Vector search RPC returned no results, using fallback")
+            # Enrich with full ticket data (select * to handle schema before/after migration)
+            ticket_ids = [str(r["ticket_id"]) for r in result.data]
+            similarities = {str(r["ticket_id"]): r.get("similarity", 0) for r in result.data}
+
+            enriched = self.client.table("tickets").select("*").in_("ticket_id", ticket_ids).execute()
+
+            if not enriched.data:
+                return result.data  # fallback to raw RPC result
+
+            for t in enriched.data:
+                t["similarity"] = similarities.get(str(t["ticket_id"]), 0)
+
+            enriched.data.sort(key=lambda x: x["similarity"], reverse=True)
+            return enriched.data
+
         except Exception as e:
-            logger.warning(f"Vector search not available: {e}")
-
-        # Fallback: Use text-based search (better than just recent tickets)
-        logger.info("Using text-based fallback search")
-        return self._text_search_fallback(top_k)
-
-    def _text_search_fallback(self, limit: int = 5) -> List[Dict[str, Any]]:
-        """Fallback text search when vector search is unavailable."""
-        try:
-            # Get all tickets with descriptions
-            tickets = self.client.table("tickets").select(
-                "ticket_id, subject, description, organization_name, priority, status, created_at"
-            ).order("created_at", desc=True).limit(min(limit * 10, 100)).execute()
-
-            if not tickets.data:
+            logger.error(f"Vector search error: {e}")
+            try:
+                fallback = self.client.table("tickets").select("*").order("created_at", desc=True).limit(top_k).execute()
+                return fallback.data if fallback.data else []
+            except:
                 return []
 
             # Return diverse set of tickets (different orgs/priorities)

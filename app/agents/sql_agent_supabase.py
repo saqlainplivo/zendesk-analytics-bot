@@ -16,106 +16,124 @@ class SQLAgent:
     """SQL analytics agent using Supabase REST API."""
 
     def __init__(self):
-        """Initialize SQL agent."""
         self.client = openai.OpenAI(api_key=settings.openai_api_key)
 
     def answer_question(
         self,
         db: SupabaseDB,
-        question: str
+        question: str,
+        organization: Optional[str] = None,
+        time_filter: Optional[Dict[str, datetime]] = None,
+        db_filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Answer analytics questions using Supabase queries."""
+        """Answer analytics questions using Supabase queries.
+
+        Args:
+            organization: Pre-extracted org name (from reasoning engine).
+                          If None, falls back to regex extraction from question.
+            time_filter:  Pre-parsed date range dict with start_date/end_date.
+                          If None, falls back to extraction from question.
+            db_filters:   Full filter dict from reasoning engine (includes priority,
+                          support_tier, status, etc.). Takes precedence over organization.
+        """
         logger.info(f"SQL Agent processing: {question}")
 
-        # Extract filters from question
-        organization = self._extract_organization(question)
-        time_filter = self._extract_time_filter(question)
+        # If db_filters provided, use organization_name from it; else fall back to regex
+        if db_filters:
+            organization = db_filters.get("organization_name") or organization
+        elif organization is None:
+            organization = self._extract_organization(question)
 
-        logger.info(f"Extracted organization: {organization}")
-        logger.info(f"Extracted time filter: {time_filter}")
+        if time_filter is None:
+            time_filter = self._extract_time_filter(question)
 
-        # Determine query type and execute
+        logger.info(f"Organization: {organization}")
+        logger.info(f"DB Filters: {db_filters}")
+        logger.info(f"Time filter: {time_filter}")
+
         question_lower = question.lower()
 
-        if "how many" in question_lower or "count" in question_lower:
-            return self._handle_count_query(db, question, organization, time_filter)
-        elif "top" in question_lower or "most" in question_lower:
+        # Check "top" before "count" — "top 5 by ticket count" contains "count"
+        if "top" in question_lower or "most" in question_lower:
             return self._handle_top_query(db, question, organization, time_filter)
+        elif "how many" in question_lower or "count" in question_lower:
+            return self._handle_count_query(db, question, organization, time_filter, db_filters)
         elif "list" in question_lower or "show" in question_lower:
-            return self._handle_list_query(db, question, organization, time_filter)
+            return self._handle_list_query(db, question, organization, time_filter, db_filters)
         else:
-            # Generic count query
-            return self._handle_count_query(db, question, organization, time_filter)
+            return self._handle_count_query(db, question, organization, time_filter, db_filters)
 
     def _handle_count_query(
         self,
         db: SupabaseDB,
         question: str,
         organization: Optional[str],
-        time_filter: Optional[Dict[str, datetime]]
+        time_filter: Optional[Dict[str, datetime]],
+        db_filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Handle count queries."""
-        filters = {}
-
-        if organization:
-            # Try exact match first, then case-insensitive
+        filters = dict(db_filters) if db_filters else {}
+        if organization and "organization_name" not in filters:
             filters["organization_name"] = organization
 
-        count = db.execute_count_query("tickets", filters)
+        count = db.execute_count_query("tickets", filters, date_range=time_filter)
+        tickets = []
 
-        # If no results with exact match, try case-insensitive search
+        # If zero with exact org match, try case-insensitive fuzzy
         if count == 0 and organization:
-            # Get all tickets and filter manually (for small datasets)
+            non_org = {k: v for k, v in filters.items() if k != "organization_name"}
             all_tickets = db.execute_select_query(
                 "tickets",
-                columns="ticket_id,subject,organization_name,created_at",
+                columns="ticket_id,subject,organization_name,priority,status,created_at",
+                filters=non_org if non_org else None,
                 order_by="-created_at",
-                limit=1000
+                limit=5000,
+                date_range=time_filter,
             )
-
-            # Case-insensitive search
             org_lower = organization.lower()
-            matching_tickets = [
-                t for t in all_tickets
-                if org_lower in t.get('organization_name', '').lower()
-            ]
-
-            count = len(matching_tickets)
-            tickets = matching_tickets[:5]
+            matching = [t for t in all_tickets if org_lower in (t.get("organization_name") or "").lower()]
+            count = len(matching)
+            tickets = matching[:5]
         else:
-            # Get sample tickets as evidence
             tickets = db.execute_select_query(
                 "tickets",
-                columns="ticket_id,subject,organization_name,priority,status,created_at,description",
-                filters=filters,
+                columns="ticket_id,subject,organization_name,priority,status,created_at",
+                filters=filters if filters else None,
                 order_by="-created_at",
-                limit=5
+                limit=5,
+                date_range=time_filter,
             )
 
-        evidence = [t["ticket_id"] for t in tickets]
-        evidence_details = tickets  # Full ticket details for preview
-
-        # Generate natural answer
-        answer = f"Found {count} ticket{'s' if count != 1 else ''}"
+        answer = f"Found **{count}** ticket{'s' if count != 1 else ''}"
+        filter_parts = []
         if organization:
-            answer += f" from {organization}"
+            filter_parts.append(f"**{organization}**")
+        for key, value in filters.items():
+            if key == "organization_name":
+                continue
+            label = key.replace("_", " ").title()
+            filter_parts.append(f"{label}: **{value}**")
+        if filter_parts:
+            answer += " matching " + ", ".join(filter_parts)
+        if time_filter:
+            answer += " in the specified time period"
         answer += "."
 
         if count > 0 and tickets:
-            answer += f"\n\nMost recent:\n"
+            answer += "\n\n**Most recent:**\n"
             for i, t in enumerate(tickets[:3], 1):
                 answer += f"{i}. {t.get('subject', 'N/A')} (#{t['ticket_id']})\n"
 
         return {
             "answer": answer,
-            "evidence": evidence,
-            "evidence_details": evidence_details,
+            "evidence": [t["ticket_id"] for t in tickets],
+            "evidence_details": tickets,
             "metadata": {
                 "count": count,
                 "query_type": "count",
                 "filters": filters,
-                "organization": organization
-            }
+                "time_filter": str(time_filter) if time_filter else None,
+            },
         }
 
     def _handle_top_query(
@@ -123,15 +141,15 @@ class SQLAgent:
         db: SupabaseDB,
         question: str,
         organization: Optional[str],
-        time_filter: Optional[Dict[str, datetime]]
+        time_filter: Optional[Dict[str, datetime]],
     ) -> Dict[str, Any]:
-        """Handle top N queries."""
+        """Handle top-N queries."""
         limit = 10
-        match = re.search(r'top\s+(\d+)', question.lower())
+        match = re.search(r"top\s+(\d+)", question.lower())
         if match:
             limit = int(match.group(1))
 
-        if "organization" in question.lower() or "customer" in question.lower() or "contributor" in question.lower():
+        if any(w in question.lower() for w in ("organization", "customer", "contributor", "company")):
             top_orgs = db.get_top_organizations(limit=limit)
 
             if not top_orgs:
@@ -139,39 +157,22 @@ class SQLAgent:
                     "answer": "No data available.",
                     "evidence": [],
                     "evidence_details": [],
-                    "metadata": {"query_type": "top_organizations"}
+                    "metadata": {"query_type": "top_organizations"},
                 }
 
-            # Generate answer
-            answer_lines = [f"Top {len(top_orgs)} organizations by ticket count:\n"]
+            lines = [f"**Top {len(top_orgs)} organizations by ticket count:**\n"]
             for i, org in enumerate(top_orgs, 1):
-                answer_lines.append(
-                    f"{i}. **{org['organization']}** - {org['ticket_count']} tickets"
-                )
+                lines.append(f"{i}. **{org['organization']}** — {org['ticket_count']} tickets")
+            answer = "\n".join(lines)
 
-            answer = "\n".join(answer_lines)
-
-            # Get sample tickets from top org
-            sample_tickets = []
-            evidence = []
-            if top_orgs:
-                sample_tickets = db.get_tickets_by_organization(
-                    top_orgs[0]["organization"],
-                    limit=5
-                )
-                evidence = [t["ticket_id"] for t in sample_tickets]
-
+            sample_tickets = db.get_tickets_by_organization(top_orgs[0]["organization"], limit=5)
             return {
                 "answer": answer,
-                "evidence": evidence,
+                "evidence": [t["ticket_id"] for t in sample_tickets],
                 "evidence_details": sample_tickets,
-                "metadata": {
-                    "query_type": "top_organizations",
-                    "results": top_orgs
-                }
+                "metadata": {"query_type": "top_organizations", "results": top_orgs},
             }
 
-        # Default: list recent tickets
         return self._handle_list_query(db, question, organization, time_filter)
 
     def _handle_list_query(
@@ -179,19 +180,21 @@ class SQLAgent:
         db: SupabaseDB,
         question: str,
         organization: Optional[str],
-        time_filter: Optional[Dict[str, datetime]]
+        time_filter: Optional[Dict[str, datetime]],
+        db_filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Handle list/show queries."""
-        filters = {}
-        if organization:
+        filters = dict(db_filters) if db_filters else {}
+        if organization and "organization_name" not in filters:
             filters["organization_name"] = organization
 
         tickets = db.execute_select_query(
             "tickets",
-            columns="ticket_id,subject,organization_name,priority,status,created_at,description",
-            filters=filters,
+            columns="ticket_id,subject,organization_name,priority,status,created_at",
+            filters=filters if filters else None,
             order_by="-created_at",
-            limit=10
+            limit=10,
+            date_range=time_filter,
         )
 
         if not tickets:
@@ -199,82 +202,68 @@ class SQLAgent:
                 "answer": "No tickets found matching the criteria.",
                 "evidence": [],
                 "evidence_details": [],
-                "metadata": {"query_type": "list"}
+                "metadata": {"query_type": "list"},
             }
 
-        # Generate answer
-        answer_lines = [f"Found {len(tickets)} recent tickets:\n"]
-        for i, ticket in enumerate(tickets, 1):
-            answer_lines.append(
-                f"{i}. **{ticket['subject']}** (#{ticket['ticket_id']})\n"
-                f"   Priority: {ticket.get('priority', 'N/A')} | "
-                f"Status: {ticket.get('status', 'N/A')}"
+        lines = [f"**{len(tickets)} recent tickets:**\n"]
+        for i, t in enumerate(tickets, 1):
+            lines.append(
+                f"{i}. **{t['subject']}** (#{t['ticket_id']})\n"
+                f"   Priority: {t.get('priority', 'N/A')} | Status: {t.get('status', 'N/A')}"
             )
 
-        answer = "\n".join(answer_lines)
-        evidence = [t["ticket_id"] for t in tickets]
-
         return {
-            "answer": answer,
-            "evidence": evidence,
+            "answer": "\n".join(lines),
+            "evidence": [t["ticket_id"] for t in tickets],
             "evidence_details": tickets,
-            "metadata": {
-                "query_type": "list",
-                "ticket_count": len(tickets)
-            }
+            "metadata": {"query_type": "list", "ticket_count": len(tickets)},
         }
 
     def _extract_organization(self, question: str) -> Optional[str]:
-        """Extract organization name from question (case-insensitive)."""
-        # Improved patterns - case insensitive, more flexible
+        """Extract organization name — only for explicit org references, not analytics terms."""
+        ANALYTICS_TERMS = {
+            "ticket", "tickets", "count", "volume", "number", "most", "least",
+            "organization", "organizations", "customer", "customers", "company",
+            "companies", "contributor", "contributors", "priority", "status",
+            "date", "time", "month", "week", "year",
+        }
+
         patterns = [
-            r'(?:from|by|for|about)\s+([a-zA-Z][a-zA-Z0-9\s\-\.]+?)(?:\s+(?:raise|create|had|last|this|in|with|did|face|report)|\?|$)',
-            r'organization[:\s]+([a-zA-Z][a-zA-Z0-9\s\-\.]+?)(?:\s+|\?|$)',
-            r'customer[:\s]+([a-zA-Z][a-zA-Z0-9\s\-\.]+?)(?:\s+|\?|$)',
+            r"(?:from|for|about)\s+([A-Z][a-zA-Z0-9\s\-\.]{1,40}?)(?:\s+(?:raise|create|had|last|this|in|with|did|face|report)|\?|$)",
+            r"(?:by)\s+([A-Z][a-zA-Z0-9\s\-\.]{1,40}?)(?:\s+(?:last|this|in|had|raise|create|did)|\?|$)",
+            r"organization[:\s]+([a-zA-Z][a-zA-Z0-9\s\-\.]+?)(?:\s+|\?|$)",
         ]
 
         for pattern in patterns:
             match = re.search(pattern, question, re.IGNORECASE)
             if match:
                 org = match.group(1).strip()
-                # Clean up common trailing words
-                org = re.sub(r'\s+(last|this|in|with|had|raise|create|did|were|was)$', '', org, flags=re.IGNORECASE)
-                org = org.strip()
-                if len(org) > 1:  # At least 2 characters
-                    logger.info(f"Extracted organization: '{org}'")
-                    return org
+                org = re.sub(r"\s+(last|this|in|with|had|raise|create|did|were|was)$", "", org, flags=re.IGNORECASE).strip()
+                if not org or len(org) <= 1:
+                    continue
+                if all(w.lower() in ANALYTICS_TERMS for w in org.split()):
+                    continue
+                logger.info(f"Extracted organization: {org}")
+                return org
 
         return None
 
     def _extract_time_filter(self, question: str) -> Optional[Dict[str, datetime]]:
         """Extract time filter from question."""
-        question_lower = question.lower()
+        q = question.lower()
         now = datetime.now()
 
-        if "last week" in question_lower or "past week" in question_lower:
-            return {
-                "start_date": now - timedelta(days=7),
-                "end_date": now
-            }
-        elif "last month" in question_lower or "past month" in question_lower:
-            return {
-                "start_date": now - timedelta(days=30),
-                "end_date": now
-            }
-        elif "this week" in question_lower:
-            return {
-                "start_date": now - timedelta(days=now.weekday()),
-                "end_date": now
-            }
-        elif "this month" in question_lower:
-            return {
-                "start_date": now.replace(day=1),
-                "end_date": now
-            }
-        elif "today" in question_lower:
-            return {
-                "start_date": now.replace(hour=0, minute=0, second=0),
-                "end_date": now
-            }
+        if "last week" in q or "past week" in q:
+            return {"start_date": now - timedelta(days=7), "end_date": now}
+        elif "last month" in q or "past month" in q:
+            return {"start_date": now - timedelta(days=30), "end_date": now}
+        elif "this week" in q:
+            return {"start_date": now - timedelta(days=now.weekday()), "end_date": now}
+        elif "this month" in q:
+            return {"start_date": now.replace(day=1), "end_date": now}
+        elif "today" in q:
+            return {"start_date": now.replace(hour=0, minute=0, second=0), "end_date": now}
+        elif "last year" in q or "past year" in q:
+            return {"start_date": now - timedelta(days=365), "end_date": now}
 
         return None

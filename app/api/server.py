@@ -58,6 +58,7 @@ class ChatResponse(BaseModel):
     """Chat response model."""
     answer: str = Field(..., description="Answer to the question")
     evidence: List[str] = Field(default=[], description="Ticket IDs supporting the answer")
+    evidence_details: List[Dict[str, Any]] = Field(default=[], description="Full ticket objects for preview")
     query_type: str = Field(..., description="Type of query (sql or rag)")
     metadata: Dict[str, Any] = Field(default={}, description="Additional metadata")
 

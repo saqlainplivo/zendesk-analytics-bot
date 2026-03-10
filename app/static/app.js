@@ -171,7 +171,7 @@ function addBotMessage(answer, queryType, evidence = [], reasoning = null) {
             </span>
         </div>
         ${reasoningHtml}
-        <div class="message-content">${escapeHtml(answer)}</div>
+        <div class="message-content">${renderMarkdown(answer)}</div>
         ${evidenceHtml}
     `;
 
@@ -312,6 +312,14 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// Render basic markdown (bold, newlines) — escapes HTML first to prevent XSS
+function renderMarkdown(text) {
+    if (!text) return '';
+    return escapeHtml(text)
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\n/g, '<br>');
 }
 
 // Initialize

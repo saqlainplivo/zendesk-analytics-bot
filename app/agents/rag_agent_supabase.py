@@ -23,6 +23,7 @@ class RAGAgent:
         self,
         db: SupabaseDB,
         question: str,
+        organization: str = None,
         top_k: int = None
     ) -> Dict[str, Any]:
         """
@@ -31,6 +32,7 @@ class RAGAgent:
         Args:
             db: Supabase database instance
             question: Natural language question
+            organization: Optional org name to filter results by
             top_k: Number of similar tickets to retrieve
 
         Returns:
@@ -40,22 +42,59 @@ class RAGAgent:
 
         top_k = top_k or settings.top_k_results
 
+        # Fetch more candidates when org filtering so we have enough after filtering
+        fetch_k = top_k * 4 if organization else top_k
+
         # Step 1: Generate query embedding
         query_embedding = self.embedder.embed_text(question)
 
         # Step 2: Retrieve similar tickets
         similar_tickets = db.search_similar_tickets(
             query_embedding=query_embedding,
-            top_k=top_k,
+            top_k=fetch_k,
             threshold=settings.similarity_threshold
         )
 
+        # Step 3: Filter by org if specified, keeping top_k results
+        if organization and similar_tickets:
+            org_lower = organization.lower()
+            org_filtered = [
+                t for t in similar_tickets
+                if org_lower in (t.get("organization_name") or "").lower()
+            ]
+            if org_filtered:
+                similar_tickets = org_filtered[:top_k]
+                logger.info(f"Filtered to {len(similar_tickets)} tickets for org '{organization}'")
+            else:
+                # No org match — keep global results but note the org in context
+                similar_tickets = similar_tickets[:top_k]
+                logger.info(f"No tickets found for org '{organization}', using global results")
+
         if not similar_tickets:
-            return {
-                "answer": "I couldn't find any relevant tickets for that question.",
-                "evidence": [],
-                "metadata": {"retrieved_count": 0}
-            }
+            # Fallback: if org specified, show recent tickets from that org
+            if organization:
+                recent = db.execute_select_query(
+                    "tickets",
+                    columns="ticket_id,subject,organization_name,priority,status,created_at",
+                    filters={"organization_name": organization},
+                    order_by="-created_at",
+                    limit=top_k,
+                )
+                if recent:
+                    logger.info(f"Vector search empty; falling back to {len(recent)} recent tickets for '{organization}'")
+                    similar_tickets = recent
+                else:
+                    return {
+                        "answer": f"No tickets found for {organization}.",
+                        "evidence": [],
+                        "metadata": {"retrieved_count": 0}
+                    }
+            else:
+                return {
+                    "answer": "I couldn't find any relevant tickets for that question.",
+                    "evidence": [],
+                    "metadata": {"retrieved_count": 0}
+                }
 
         logger.info(f"Retrieved {len(similar_tickets)} similar tickets")
 
@@ -84,18 +123,30 @@ class RAGAgent:
         # Build context from tickets
         context_parts = []
         for i, ticket in enumerate(tickets, 1):
-            description = ticket.get('description') or 'N/A'
-            if description != 'N/A':
-                description = description[:300] + "..."
-
-            context_parts.append(
-                f"Ticket #{i} (ID: {ticket.get('ticket_id', 'N/A')}):\n"
-                f"Organization: {ticket.get('organization_name', 'N/A')}\n"
-                f"Subject: {ticket.get('subject', 'N/A')}\n"
-                f"Description: {description}\n"
-                f"Created: {ticket.get('created_at', 'N/A')}\n"
-                f"Similarity: {ticket.get('similarity', 0):.2f}\n"
-            )
+            lines = [
+                f"Ticket #{i} (ID: {ticket.get('ticket_id', 'N/A')}):",
+                f"  Organization : {ticket.get('organization_name') or 'N/A'}",
+                f"  Subject      : {ticket.get('subject') or 'N/A'}",
+            ]
+            if ticket.get("product"):
+                lines.append(f"  Product      : {ticket['product']}")
+            if ticket.get("ticket_type"):
+                lines.append(f"  Type         : {ticket['ticket_type']}")
+            if ticket.get("priority"):
+                lines.append(f"  Priority     : {ticket['priority']}")
+            if ticket.get("country"):
+                lines.append(f"  Country      : {ticket['country']}")
+            if ticket.get("support_tier"):
+                lines.append(f"  Support Tier : {ticket['support_tier']}")
+            if ticket.get("satisfaction_score"):
+                lines.append(f"  Satisfaction : {ticket['satisfaction_score']}")
+            if ticket.get("resolution_time"):
+                lines.append(f"  Resolved in  : {ticket['resolution_time']} min")
+            if ticket.get("replies"):
+                lines.append(f"  Replies      : {ticket['replies']}")
+            lines.append(f"  Created      : {ticket.get('created_at') or 'N/A'}")
+            lines.append(f"  Similarity   : {ticket.get('similarity', 0):.2f}")
+            context_parts.append("\n".join(lines))
 
         context = "\n---\n".join(context_parts)
 
