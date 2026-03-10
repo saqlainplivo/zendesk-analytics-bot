@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Zendesk Analytics</title>
     <link rel="stylesheet" href="/static/styles.css">
+    <!-- Marked.js for markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
     <!-- Main Container -->
@@ -12,7 +14,10 @@
         <!-- Header -->
         <header class="header">
             <div class="header-content">
-                <h1 class="logo">Zendesk Analytics</h1>
+                <div class="logo-section">
+                    <h1 class="logo">Zendesk Analytics</h1>
+                    <span class="logo-subtitle">Powered by Groq LPU</span>
+                </div>
                 <div class="status-badge" id="statusBadge">
                     <span class="status-dot"></span>
                     <span id="statusText">Ready</span>
@@ -26,20 +31,20 @@
             <div class="welcome-screen" id="welcomeScreen">
                 <div class="welcome-content">
                     <h2>Ask anything about your tickets</h2>
-                    <p>Powered by hybrid AI: SQL analytics + semantic search</p>
+                    <p>Lightning-fast analytics with Groq-powered reasoning</p>
 
                     <div class="example-queries">
-                        <button class="example-btn" data-query="How many tickets did Kixie raise last month?">
+                        <button class="example-btn" data-query="How many tickets did Bolna raise?">
                             <span class="example-icon">📊</span>
-                            <span>How many tickets did Kixie raise last month?</span>
+                            <span>How many tickets did Bolna raise?</span>
                         </button>
                         <button class="example-btn" data-query="What issues did Kixie face recently?">
                             <span class="example-icon">🔍</span>
                             <span>What issues did Kixie face recently?</span>
                         </button>
-                        <button class="example-btn" data-query="Top 5 customers by ticket count">
+                        <button class="example-btn" data-query="Top 10 customers by ticket count">
                             <span class="example-icon">📈</span>
-                            <span>Top 5 customers by ticket count</span>
+                            <span>Top 10 customers by ticket count</span>
                         </button>
                         <button class="example-btn" data-query="Summarize high-priority tickets">
                             <span class="example-icon">⚡</span>
@@ -72,6 +77,7 @@
         </div>
     </div>
 
+    <!-- Ticket Preview Modal (template) -->
     <script src="/static/app.js"></script>
 </body>
 </html>

@@ -6,8 +6,11 @@ from typing import Dict, Any, Optional
 
 from app.agents.sql_agent_supabase import SQLAgent
 from app.agents.rag_agent_supabase import RAGAgent
-from app.agents.reasoning_engine import ReasoningEngine
+from app.agents.groq_reasoning_engine import GroqReasoningEngine
+from app.agents.nvidia_reasoning_engine import NvidiaReasoningEngine
 from app.database.supabase_db import SupabaseDB
+from app.config import settings
+from app.utils.time_parser import TimeParser
 
 logger = logging.getLogger(__name__)
 
@@ -78,15 +81,31 @@ class RouterAgent:
         db_filters: Dict[str, Any],
         time_filter: Optional[Dict[str, datetime]],
     ) -> Dict[str, Any]:
-        """Handle count queries with db_filters dict from reasoning engine."""
-        organization = db_filters.get("organization_name")
-        tickets = []
+        """Handle count queries with fuzzy organization filtering."""
+        # Parse time filter if present
+        time_range = TimeParser.parse_time_filter(question)
 
-        if not db_filters:
-            count = db.execute_count_query("tickets", date_range=time_filter)
+        # Extract status filter for SQL query optimization
+        question_lower = question.lower()
+        status_filter = None
+        if "open" in question_lower and not organization:
+            status_filter = "open"
+        elif "closed" in question_lower and not organization:
+            status_filter = "closed"
+        elif "pending" in question_lower and not organization:
+            status_filter = "pending"
+
+        if not organization:
+            # No organization filter - use SQL filters directly
+            filters = {}
+            if status_filter:
+                filters["status"] = status_filter
+
+            count = db.execute_count_query("tickets", filters if filters else None)
             tickets = db.execute_select_query(
                 "tickets",
-                columns="ticket_id,subject,organization_name,priority,status,created_at",
+                columns="ticket_id,subject,organization_name,priority,status,created_at,description",
+                filters=filters if filters else None,
                 order_by="-created_at",
                 limit=5,
                 date_range=time_filter,

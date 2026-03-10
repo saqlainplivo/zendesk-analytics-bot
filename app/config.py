@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4-turbo-preview"
     llm_temperature: float = 0.0
 
+    # Groq (for fast reasoning)
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"  # Fast and accurate
+
+    # NVIDIA NIM (alternative reasoning engine)
+    nvidia_nim_api_key: str = ""
+    reasoning_engine: str = "groq"  # Options: "groq", "nvidia", "openai"
+
     # Supabase (primary database connection)
     supabase_url: str
     supabase_anon_key: str

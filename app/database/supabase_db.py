@@ -186,7 +186,7 @@ class SupabaseDB:
         top_k: int = 5,
         threshold: float = 0.7
     ) -> List[Dict[str, Any]]:
-        """Search for similar tickets using vector similarity."""
+        """Search for similar tickets using vector similarity or text search fallback."""
         try:
             result = self.client.rpc(
                 "match_tickets",
@@ -223,6 +223,26 @@ class SupabaseDB:
                 return fallback.data if fallback.data else []
             except:
                 return []
+
+            # Return diverse set of tickets (different orgs/priorities)
+            diverse_tickets = []
+            seen_orgs = set()
+
+            for ticket in tickets.data:
+                org = ticket.get("organization_name", "")
+                # Prioritize tickets from different organizations
+                if org not in seen_orgs or len(diverse_tickets) < limit:
+                    diverse_tickets.append(ticket)
+                    seen_orgs.add(org)
+
+                if len(diverse_tickets) >= limit:
+                    break
+
+            logger.info(f"✓ Text fallback returned {len(diverse_tickets)} diverse tickets")
+            return diverse_tickets
+        except Exception as e:
+            logger.error(f"Text fallback search error: {e}")
+            return []
 
     def get_ticket_by_id(self, ticket_id: str) -> Optional[Dict[str, Any]]:
         """Get a single ticket by ID."""

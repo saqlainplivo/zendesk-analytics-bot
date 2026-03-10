@@ -1,0 +1,98 @@
+{
+  "count_queries": [
+    "How many tickets did Bolna raise?",
+    "Count tickets from Kixie",
+    "Total number of tickets",
+    "How many tickets are there?",
+    "Show me ticket count for 8x8",
+    "Number of support tickets",
+    "Count all tickets",
+    "How many issues were reported?",
+    "Total tickets in the system",
+    "Ticket count from Accenture"
+  ],
+  "organization_queries": [
+    "Show me all tickets from Bolna",
+    "List Kixie tickets",
+    "What tickets does 8x8 have?",
+    "Get me Accenture tickets",
+    "Show tickets for 99 Drive",
+    "Display all issues from 10.digital",
+    "Tickets raised by AbsolU Healthcare",
+    "Show me 6d Technologies tickets",
+    "List all tickets from ACG",
+    "Get tickets for Aarav Info Solutions"
+  ],
+  "priority_queries": [
+    "Show high priority tickets",
+    "List urgent tickets",
+    "Critical issues in the system",
+    "Show me all high priority issues",
+    "What are the urgent tickets?",
+    "Display critical priority tickets",
+    "High priority tickets from last week",
+    "Show urgent issues",
+    "Critical tickets that need attention",
+    "High severity tickets"
+  ],
+  "status_queries": [
+    "Show open tickets",
+    "List closed tickets",
+    "Pending tickets",
+    "Show solved tickets",
+    "What tickets are in progress?",
+    "Display all open issues",
+    "Show resolved tickets",
+    "List all pending issues",
+    "Tickets waiting for response",
+    "Show tickets that need attention"
+  ],
+  "semantic_search_queries": [
+    "What issues did Bolna face?",
+    "Show me problems with authentication",
+    "Find tickets about API errors",
+    "What issues are related to SMS?",
+    "Show me tickets about billing",
+    "Find problems with provisioning",
+    "What are the common issues?",
+    "Show me tickets about compliance",
+    "Find issues related to integration",
+    "What problems do customers face?"
+  ],
+  "aggregate_queries": [
+    "Top 10 customers by ticket count",
+    "Which organizations have the most tickets?",
+    "Show me top 5 customers",
+    "Organizations with highest ticket volume",
+    "Top customers by support requests",
+    "Which companies report the most issues?",
+    "Show top 10 organizations",
+    "Customers with most tickets",
+    "Organizations sorted by ticket count",
+    "Top 20 customers"
+  ],
+  "time_based_queries": [
+    "Tickets from last month",
+    "Show me recent tickets",
+    "Issues reported this week",
+    "Tickets from last 7 days",
+    "Show me today's tickets",
+    "Recent support requests",
+    "Tickets created yesterday",
+    "Issues from last 30 days",
+    "Show me this month's tickets",
+    "Recent open tickets"
+  ],
+  "combined_queries": [
+    "High priority tickets from Bolna",
+    "Open tickets for Kixie",
+    "Critical issues from last week",
+    "Closed tickets from Accenture",
+    "Urgent tickets about API",
+    "Show me Bolna's open issues",
+    "High priority tickets from last month",
+    "Pending tickets for 8x8",
+    "Critical SMS issues",
+    "Recent high priority tickets"
+  ]
+}
