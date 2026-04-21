@@ -4,6 +4,8 @@
 
 Enterprise-grade LLM-powered chatbot with **Groq + GPT-4 hybrid intelligence** using **Supabase REST API**.
 
+![Zendesk Analytics UI](docs/screenshot.png)
+
 ## ⚡ Performance Highlights
 
 - **🎯 92.5% Accuracy** (74/80 test queries successful)

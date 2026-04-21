@@ -190,28 +190,28 @@ class RouterAgent:
 
                 matching_tickets.append(t)
 
-        count = len(matching_tickets)
-        tickets = matching_tickets[:5]
+            count = len(matching_tickets)
+            tickets = matching_tickets[:5]
 
         # Only apply additional filters if explicitly mentioned in question
         question_lower = question.lower()
         has_priority_filter = any(kw in question_lower for kw in ["high", "urgent", "critical", "low", "normal", "priority"])
         has_status_filter = any(kw in question_lower for kw in ["open", "closed", "pending", "solved", "resolved"])
 
-        if matching_tickets and (has_priority_filter or has_status_filter):
+        if organization and matching_tickets and (has_priority_filter or has_status_filter):
             filtered = self._apply_additional_filters(matching_tickets, question)
-            if filtered:  # Only apply if we still have results
+            if filtered:
                 count = len(filtered)
                 tickets = filtered[:5]
                 logger.info(f"🎯 Applied filters: priority={has_priority_filter}, status={has_status_filter}")
 
-        if count > 0:
-                unique_orgs = set(t.get('organization_name') for t in matching_tickets[:10])
-                if time_range:
-                    time_desc = TimeParser.format_time_range(time_range[0], time_range[1])
-                    logger.info(f"✓ Found {count} tickets matching '{organization}' {time_desc}")
-                else:
-                    logger.info(f"✓ Found {count} tickets matching '{organization}' in orgs: {list(unique_orgs)}")
+        if organization and count > 0:
+            unique_orgs = set(t.get('organization_name') for t in matching_tickets[:10])
+            if time_range:
+                time_desc = TimeParser.format_time_range(time_range[0], time_range[1])
+                logger.info(f"✓ Found {count} tickets matching '{organization}' {time_desc}")
+            else:
+                logger.info(f"✓ Found {count} tickets matching '{organization}' in orgs: {list(unique_orgs)}")
 
         evidence = [t["ticket_id"] for t in tickets]
 

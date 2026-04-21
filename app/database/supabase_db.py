@@ -33,6 +33,16 @@ class SupabaseDB:
     def __init__(self):
         self.client = get_supabase()
 
+    CASE_INSENSITIVE_FIELDS = {"status", "priority"}
+
+    def _apply_filter(self, query, key: str, value):
+        """Apply a filter, using ilike for case-insensitive fields."""
+        if isinstance(value, list):
+            return query.in_(key, value)
+        if key in self.CASE_INSENSITIVE_FIELDS:
+            return query.ilike(key, value)
+        return query.eq(key, value)
+
     def execute_count_query(self, table: str, filters: Optional[Dict[str, Any]] = None) -> int:
         """Execute a count query on a table."""
         try:
@@ -40,10 +50,7 @@ class SupabaseDB:
 
             if filters:
                 for key, value in filters.items():
-                    if isinstance(value, list):
-                        query = query.in_(key, value)
-                    else:
-                        query = query.eq(key, value)
+                    query = self._apply_filter(query, key, value)
 
             result = query.execute()
             return result.count if result.count is not None else 0
@@ -65,10 +72,7 @@ class SupabaseDB:
 
             if filters:
                 for key, value in filters.items():
-                    if isinstance(value, list):
-                        query = query.in_(key, value)
-                    else:
-                        query = query.eq(key, value)
+                    query = self._apply_filter(query, key, value)
 
             if order_by:
                 desc = order_by.startswith("-")

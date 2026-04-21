@@ -31,14 +31,15 @@ CREATE TABLE tickets (
     solved_at TIMESTAMP WITH TIME ZONE,
     via_channel VARCHAR(50),
     satisfaction_score VARCHAR(50),
-    created_date DATE GENERATED ALWAYS AS (created_at::DATE) STORED,
-    INDEX idx_tickets_org (organization_name),
-    INDEX idx_tickets_created_at (created_at),
-    INDEX idx_tickets_priority (priority),
-    INDEX idx_tickets_status (status),
-    INDEX idx_tickets_created_date (created_date),
-    INDEX idx_tickets_tags (tags) USING GIN
+    created_date DATE GENERATED ALWAYS AS (created_at::DATE) STORED
 );
+
+CREATE INDEX idx_tickets_org ON tickets (organization_name);
+CREATE INDEX idx_tickets_created_at ON tickets (created_at);
+CREATE INDEX idx_tickets_priority ON tickets (priority);
+CREATE INDEX idx_tickets_status ON tickets (status);
+CREATE INDEX idx_tickets_created_date ON tickets (created_date);
+CREATE INDEX idx_tickets_tags ON tickets USING GIN (tags);
 
 -- Comments table
 CREATE TABLE comments (
@@ -48,10 +49,11 @@ CREATE TABLE comments (
     author_email VARCHAR(255),
     body TEXT,
     is_public BOOLEAN DEFAULT true,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    INDEX idx_comments_ticket (ticket_id),
-    INDEX idx_comments_created_at (created_at)
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL
 );
+
+CREATE INDEX idx_comments_ticket ON comments (ticket_id);
+CREATE INDEX idx_comments_created_at ON comments (created_at);
 
 -- Ticket embeddings table (for semantic search)
 CREATE TABLE ticket_embeddings (
@@ -64,16 +66,15 @@ CREATE TABLE ticket_embeddings (
     UNIQUE(ticket_id)
 );
 
--- Create index for vector similarity search using cosine distance
+-- Vector similarity search index (cosine distance)
 CREATE INDEX idx_ticket_embeddings_vector
 ON ticket_embeddings
 USING ivfflat (embedding vector_cosine_ops)
 WITH (lists = 100);
 
--- Index for quick ticket lookup
 CREATE INDEX idx_ticket_embeddings_ticket_id ON ticket_embeddings(ticket_id);
 
--- Create view for common analytics queries
+-- Analytics view
 CREATE OR REPLACE VIEW ticket_analytics AS
 SELECT
     ticket_id,
@@ -83,23 +84,25 @@ SELECT
     status,
     created_at,
     created_date,
-    DATE_TRUNC('month', created_at) as created_month,
-    DATE_TRUNC('week', created_at) as created_week,
+    DATE_TRUNC('month', created_at) AS created_month,
+    DATE_TRUNC('week', created_at) AS created_week,
     tags,
     issue_type,
     region
 FROM tickets;
 
--- Function to search tickets by semantic similarity
-CREATE OR REPLACE FUNCTION search_tickets_by_embedding(
+-- RPC function for vector similarity search (used by RAG agent)
+CREATE OR REPLACE FUNCTION match_tickets(
     query_embedding vector(1536),
     match_threshold float DEFAULT 0.7,
     match_count int DEFAULT 5
 )
 RETURNS TABLE (
-    ticket_id VARCHAR(50),
-    subject TEXT,
-    content TEXT,
+    ticket_id varchar,
+    subject text,
+    description text,
+    organization_name varchar,
+    created_at timestamptz,
     similarity float
 )
 LANGUAGE plpgsql
@@ -109,8 +112,10 @@ BEGIN
     SELECT
         t.ticket_id,
         t.subject,
-        te.content,
-        1 - (te.embedding <=> query_embedding) as similarity
+        t.description,
+        t.organization_name,
+        t.created_at,
+        1 - (te.embedding <=> query_embedding) AS similarity
     FROM ticket_embeddings te
     JOIN tickets t ON t.ticket_id = te.ticket_id
     WHERE 1 - (te.embedding <=> query_embedding) > match_threshold
@@ -118,7 +123,3 @@ BEGIN
     LIMIT match_count;
 END;
 $$;
-
--- Grant permissions (adjust as needed for your setup)
--- GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO your_user;
--- GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO your_user;
